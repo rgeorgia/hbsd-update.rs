@@ -98,11 +98,11 @@ pub struct Cli {
     #[arg(long, action = ArgAction::SetTrue)]
     pub verbose: bool,
 
-    /// Force IPv4
+    /// Force IPv4, Conflicts with IPv6
     #[arg(long, action = ArgAction::SetTrue, conflicts_with = "force_ipv6")]
     pub force_ipv4: bool,
 
-    /// Force IPv6
+    /// Force IPv6, Conflicts with IPv4
     #[arg(long, action = ArgAction::SetTrue, conflicts_with = "force_ipv4")]
     pub force_ipv6: bool,
 
@@ -121,6 +121,11 @@ pub struct Cli {
     /// Extra network flag string (empty means "none")
     #[arg(long, value_name = "FLAG", default_value = "")]
     pub net_flag: String,
+
+    /// Path to custom configuration file
+    #[arg(long, value_name = "HBSD-CONFIG", default_value = "/etc/hbsd-update.conf")]
+    pub config_file: String,
+
 }
 
 impl Cli {
