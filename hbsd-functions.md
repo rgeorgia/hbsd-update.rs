@@ -118,6 +118,7 @@
 		kernel-<kernel>.txz (if kernel enabled)
 
 - Optional signed files:
+
 		ObsoleteFiles.txt
 		ObsoleteDirs.txt
 		script.sh
