@@ -1,0 +1,149 @@
+//! # hbsd-update (Rust port) — architecture & behavior notes
+//!
+//! This crate is a Rust re-implementation of the classic `hbsd-update` shell
+//! script used by HardenedBSD. The original script orchestrates version
+//! discovery, update download + verification, and application of the update
+//! payload (base system, kernel, optional sources, Integriforce rules, and
+//! obsolete-file cleanup), optionally targeting a ZFS Boot Environment (BE) or
+//! a jail mountpoint.
+//!
+//! The goal of this Rust port is to preserve the **semantics and safety checks**
+//! of the shell implementation while making the code easier to test, reuse, and
+//! reason about.
+//!
+//! ## High-level flow
+//!
+//! The `main` pipeline (regardless of implementation language) is roughly:
+//!
+//! 1. Parse CLI options into an `Options` struct
+//! 2. Load config (`hbsd-update.conf`) and run sanity checks
+//! 3. Resolve target mountpoint (live root, jail path, or BE mount)
+//! 4. Determine target version + update hash
+//!    - CLI override (`-v`) **or**
+//!    - DNS TXT record (optionally DNSSEC validated) **or**
+//!    - HTTP fallback (`update-latest.txt`)
+//! 5. If `-C` (check only): report local/remote version and exit
+//! 6. If already up-to-date (and not `--ignore-version`): exit
+//! 7. Download update tarball, verify hash if provided
+//! 8. If signatures are required: validate pubkey + validate set signatures
+//! 9. Enforce securelevel constraints
+//! 10. Apply updates in order:
+//!     - kernel (optional)
+//!     - mtree normalization (optional)
+//!     - base system (optional)
+//!     - obsolete removals (optional / interactive)
+//!     - Integriforce rules (optional)
+//! 11. Cache installed version
+//! 12. If BE was used: activate it
+//! 13. Cleanup temp working dir
+//!
+//! ## Core concepts
+//!
+//! - **Config**: Values loaded from `hbsd-update.conf` (shell-style syntax in
+//!   the original; Rust port may use a dedicated parser).
+//! - **Options**: CLI flags that override config defaults.
+//! - **Mountpoint**: Root directory where the update is applied:
+//!   - `/` (default),
+//!   - jail root (from `jls`), or
+//!   - mounted BE root (via `beadm`/`bectl`).
+//! - **Update set**: Files extracted from `update-<version>.tar` (e.g.
+//!   `base.txz`, `etcupdate.tbz`, `mtree.tar`, `kernel-*.txz`, signatures).
+//!
+//! ## Safety invariants
+//!
+//! The port should preserve these guardrails:
+//!
+//! - Refuse to proceed at `kern.securelevel > 0`.
+//! - If signatures are required, refuse unsigned updates and fail closed.
+//! - If `update_hash` is present, validate tarball integrity before extracting.
+//! - Enforce mutual exclusions:
+//!   - BE mode and jail mode cannot both be enabled
+//!   - `force_ipv4` and `force_ipv6` cannot both be enabled
+//!   - fetch-only / download-only / no-download behave consistently
+//!
+//! ## Suggested module layout
+//!
+//! The original shell functions map nicely to Rust modules:
+//!
+//! - `cli` — parse CLI flags into `Options`
+//! - `config` — load config into `Config`
+//! - `version` — DNS/DNSSEC + HTTP fallback version discovery
+//! - `fetch` — download tarball, integrity checks
+//! - `verify` — pubkey validity + signature validation of update set
+//! - `apply` — mtree/base/kernel/obsolete/integriforce application
+//! - `be` — Boot Environment creation/mount/activate/destroy
+//! - `jail` — jail mountpoint discovery
+//! - `state` — cache version, cleanup temp dir
+//! - `hooks` — optional pre/post install hooks
+//!
+//! ## Function-by-function mapping (shell → Rust responsibilities)
+//!
+//! The original script’s functions correspond to these behaviors, which can be
+//! implemented as Rust functions/methods with unit tests:
+//!
+//! ### Helpers / UI
+//! - `is_true` → bool parsing helper (`yes|1`)
+//! - `debug_print` / `usage` → logging + help text
+//! - `sigint_handler` → RAII cleanup / `Drop` guards + signal handling
+//! - `get_tmpdir` → tempdir creation (e.g. `tempfile` crate)
+//! - `get_last_field` → small parsing utility (prefer typed parsers in Rust)
+//!
+//! ### Version discovery
+//! - `dnssec_check` → DNS TXT query; optionally DNSSEC-validated
+//! - `get_version` → choose remote version + optional `update_hash`
+//! - `check_version` → compare remote vs cached local version
+//! - `check_jailname` → resolve mountpoint via `jls`
+//!
+//! ### Downloading / integrity
+//! - `fetch_update` → download tarball; verify `sha256|sha512` if provided;
+//!   extract update set
+//! - `check_securelevel` → read `kern.securelevel` and fail when > 0
+//!
+//! ### Signature verification
+//! - `check_pubkey_validity` → verify pubkey not revoked + verify chain
+//! - `validate_file` → verify file signatures (RSA verify-recover + SHA512)
+//! - `check_set_validity` → validate required + optional signed files
+//!
+//! ### Applying update payload
+//! - `apply_mtree` → extract mtree specs and apply ownership/mode constraints
+//! - `apply_base` → install `base.txz`, handle boot staging, run `etcupdate`,
+//!   rehash certs, rebuild passwd db when needed
+//! - `set_kernel_config` → choose kernel flavor (`-k` or infer from system)
+//! - `apply_kernel` → install kernel, backups, `kldxref`
+//! - `apply_integriforce` → install rules, set perms + immutability
+//! - `remove_obsolete` → remove obsolete files/dirs, interactive option
+//!
+//! ### Boot Environments
+//! - `create_be` → create and mount BE, change mountpoint to BE mount
+//! - `activate_be` → activate BE post-install
+//! - `destroy_be` → cleanup BE on error/interrupt
+//!
+//! ### State / hooks
+//! - `cache_version` → write `${mountpoint}/var/db/hbsd-update/version`
+//! - `cleanup` → remove tempdir unless `--keep-tmp`
+//! - `check_sanity` → validate config + options coherence
+//! - `pre_install_hook` / `post_install_hook` → extension points
+//! - `report_version_machine_readable` → JSON or structured output for `-m`
+//!
+//! ## Notes on current script quirks
+//!
+//! If your Rust port is based on your repo’s current shell script snapshot, be
+//! aware of a likely unfinished refactor in the shell version around version
+//! reporting (a missing `report_version` and a self-recursive
+//! `report_version_machine_readable`). In Rust, prefer a single well-tested
+//! reporting function that can emit either human-readable or JSON output.
+//!
+//! ## Testing strategy
+//!
+//! - Unit test parsers: config parsing, version TXT parsing, hash parsing.
+//! - Property tests: boolean parsing, safe path joins under mountpoint.
+//! - Integration tests with fixtures:
+//!   - a fake update set directory containing required/optional files
+//!   - mocked `fetch` responses and signature validation results
+//! - “Dry run” mode should log intended actions without mutating filesystem.
+//!
+//! ---
+//!
+//! The rest of this crate should implement the above pipeline in a structured,
+//! testable way, while matching the shell script’s behavior where it matters.
+
